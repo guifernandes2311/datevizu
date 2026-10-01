@@ -134,7 +134,7 @@ let RT_NOTIF=null,RT_AGENDA=null,RT_AGENDA_ID=null;
 function subscribeNotifications(){
  if(RT_NOTIF)return;
  RT_NOTIF=sb.channel('notif-'+ME.id)
-  .on('postgres_changes',{event:'*',schema:'public',table:'notifications',filter:'user_id=eq.'+ME.id},async()=>{await loadNotifications();R()})
+  .on('postgres_changes',{event:'*',schema:'public',table:'notifications',filter:'user_id=eq.'+ME.id},async()=>{await loadNotifications();R(1)})
   .subscribe();
 }
 async function subscribeAgenda(agId){
@@ -142,9 +142,9 @@ async function subscribeAgenda(agId){
  if(RT_AGENDA)await sb.removeChannel(RT_AGENDA);
  RT_AGENDA_ID=agId;
  RT_AGENDA=sb.channel('agenda-'+agId)
-  .on('postgres_changes',{event:'*',schema:'public',table:'events',filter:'agenda_id=eq.'+agId},async()=>{if(S.ag==agId){await loadAgenda(agId);R()}})
-  .on('postgres_changes',{event:'*',schema:'public',table:'questions',filter:'agenda_id=eq.'+agId},async()=>{if(S.ag==agId){await loadAgenda(agId);R()}})
-  .on('postgres_changes',{event:'*',schema:'public',table:'agenda_members',filter:'agenda_id=eq.'+agId},async()=>{if(S.ag==agId){await loadAgenda(agId);await loadMyAgendas();R()}})
+  .on('postgres_changes',{event:'*',schema:'public',table:'events',filter:'agenda_id=eq.'+agId},async()=>{if(S.ag==agId){await loadAgenda(agId);R(1)}})
+  .on('postgres_changes',{event:'*',schema:'public',table:'questions',filter:'agenda_id=eq.'+agId},async()=>{if(S.ag==agId){await loadAgenda(agId);R(1)}})
+  .on('postgres_changes',{event:'*',schema:'public',table:'agenda_members',filter:'agenda_id=eq.'+agId},async()=>{if(S.ag==agId){await loadAgenda(agId);await loadMyAgendas();R(1)}})
   .subscribe();
 }
 
@@ -196,12 +196,21 @@ const modal=a=>{const e=S.mod.id?a.events.find(x=>x.id==S.mod.id):{title:'',date
 const hdr=a=>{const u=ME,nn=u?NOTIFS.slice().sort((x,y)=>y.ts-x.ts):[],un=nn.filter(n=>!n.r).length;
 return `<header><div class="wrap row sb" style="padding-bottom:6px"><span class="logo" onclick="A.go('${u?'home':'land'}')"><img class="lg" src="${LOGO}" alt="Datevizu"></span>${u?`<div class="row"><button class="bell" onclick="A.pop()" aria-label="Notificações">🔔${un?`<b>${un}</b>`:''}</button><button class="btn g s" onclick="A.go('prof')">${E(u.name.split(' ')[0])}</button></div>`:`<div class="row"><button class="btn g s" onclick="A.go('auth','login')">Entrar</button><button class="btn s" onclick="A.go('auth','signup')">Criar conta</button></div>`}</div>${u?`<div class="wrap" style="padding-top:0"><nav>${[['home','Início'],['mine','Minhas agendas'],['cal','Agenda'],['ppl','Participantes'],['cfg','Configurações']].map(x=>`<a class="${S.p==x[0]?'on':''}" onclick="A.go('${x[0]}')">${x[1]}</a>`).join('')}</nav></div>`:''}${S.pop?`<div class="card pop"><div class="row sb"><b>Notificações</b><a class="m" onclick="A.readAll()">Marcar como lidas</a></div>${nn.slice(0,12).map(n=>`<div class="ni${n.r?'':' u'}" onclick="A.nt('${n.id}')">${E(n.text)}<div class="m">${tm(n.ts)}</div></div>`).join('')||'<p class="m">Nada por aqui.</p>'}</div>`:''}</header>`};
 
-function R(){
+// keep=true (re-render vindo do realtime): preserva o que o usuário está digitando
+function R(keep){
+ let sv=[],fid=null,fs=null,fe=null;
+ if(keep){
+  sv=[...document.querySelectorAll('#app input[id],#app textarea[id],#app select[id]')].map(x=>[x.id,x.value]);
+  const f=document.activeElement;
+  if(f&&f.id&&sv.some(x=>x[0]==f.id)){fid=f.id;try{fs=f.selectionStart;fe=f.selectionEnd}catch(e){}}
+ }
  let p=S.p;
- if(!ME)p=p=='auth'?'auth':'land';else if(p=='land'||p=='auth')p='home';
+ if(!ME)p=p=='auth'?'auth':'land';else if((p=='land'||p=='auth')&&!S.recovery)p='home';
  const a=cur();if(ME&&['cal','ppl','cfg'].includes(p)&&!a)p='mine';S.p=p;
  const V={land,auth,home,mine,cal,ppl,cfg,prof}[p];
  $('#app').innerHTML=hdr(a)+(p=='land'?V():`<main class="wrap">${V(a)}</main>`)+(S.mod&&a?modal(a):'');
+ sv.forEach(([id,v])=>{const x=document.getElementById(id);if(x&&x.value!==v)x.value=v});
+ if(fid){const x=document.getElementById(fid);if(x){x.focus();try{x.setSelectionRange(fs,fe)}catch(e){}}}
 }
 
 const A={
@@ -210,20 +219,26 @@ mask(i){i.value=i.value.replace(/\D/g,'').slice(0,11).replace(/(\d{3})(\d)/,'$1.
 
 async init(){
  sb.auth.onAuthStateChange((event,session)=>{
-  if(event=='PASSWORD_RECOVERY'){S.mode='newpass';S.p='auth';R()}
-  if(event=='SIGNED_OUT'){ME=null;MY_AGS=[];AG=null;NOTIFS=[];S.p='land';R()}
+  if(event=='PASSWORD_RECOVERY'){S.recovery=true;S.mode='newpass';S.p='auth';R()}
+  if(event=='SIGNED_OUT'){
+   if(RT_NOTIF)sb.removeChannel(RT_NOTIF);
+   if(RT_AGENDA)sb.removeChannel(RT_AGENDA);
+   RT_NOTIF=RT_AGENDA=RT_AGENDA_ID=null;
+   ME=null;MY_AGS=[];AG=null;NOTIFS=[];PROFILES={};
+   S.ag=null;S.ev=null;S.mod=null;S.pop=0;S.recovery=false;S.mode='login';S.p='land';R();
+  }
  });
  const{data:{session}}=await sb.auth.getSession();
  if(session)await A.afterAuth(session.user);else{S.p='land';R()}
 },
 
 async afterAuth(user){
- const{data:prof}=await sb.from('profiles').select('name,cpf').eq('id',user.id).maybeSingle();
- ME={id:user.id,email:user.email,name:prof?.name||user.email,cpf:prof?.cpf};
+ const{data:prof}=await sb.from('profiles').select('name').eq('id',user.id).maybeSingle();
+ ME={id:user.id,email:user.email,name:prof?.name||user.email,cpf:user.user_metadata?.cpf};
  PROFILES[ME.id]=ME.name;
  await Promise.all([loadMyAgendas(),loadNotifications()]);
  try{subscribeNotifications()}catch(e){}
- if(S.p=='land'||S.p=='auth'){S.p='home';S.ag=(MY_AGS[0]||{}).id;S.day=iso(new Date());S.m=new Date()}
+ if(!S.recovery&&(S.p=='land'||S.p=='auth')){S.p='home';S.ag=(MY_AGS[0]||{}).id;S.day=iso(new Date());S.m=new Date()}
  R();
 },
 
@@ -242,7 +257,7 @@ async signup(e){
  if(!cpfOk(c))return T('CPF inválido'),false;
  const{data,error}=await sb.auth.signUp({email:m,password:p,options:{data:{name:n,cpf:c}}});
  if(error){
-  const msg=/cpf_duplicado/.test(error.message)?'CPF já cadastrado':/registered|exists/i.test(error.message)?'E-mail já cadastrado':error.message;
+  const msg=/cpf_duplicado|database error|profiles_cpf_key/i.test(error.message)?'CPF já cadastrado':/registered|exists/i.test(error.message)?'E-mail já cadastrado':error.message;
   return T(msg),false;
  }
  if(!data.session){T('Conta criada! Verifique seu e-mail para confirmar antes de entrar.');S.mode='login';R();return false}
@@ -267,6 +282,7 @@ async setnewpass(e){
  const{error}=await sb.auth.updateUser({password:p});
  if(error)return T('Não foi possível redefinir a senha'),false;
  T('Senha redefinida.');
+ S.recovery=false;
  const{data:{session}}=await sb.auth.getSession();
  if(session)await A.afterAuth(session.user);else{S.mode='login';R()}
  return false;
@@ -281,10 +297,13 @@ async create(){
  let ag=null;
  for(let i=0;i<5&&!ag;i++){
   const{data,error}=await sb.from('agendas').insert({name:n,code:code(),owner_id:ME.id}).select().single();
-  if(!error)ag=data;else if(error.code!='23505')break;
+  if(!error)ag=data;
+  else if(error.code=='23505'&&/one_per_owner/.test(error.message)){await loadMyAgendas();R();return T('Você já criou uma agenda')}
+  else if(error.code!='23505')break;
  }
  if(!ag)return T('Não foi possível criar a agenda, tente novamente');
- await sb.from('agenda_members').insert({agenda_id:ag.id,user_id:ME.id,role:'a'});
+ const{error:me}=await sb.from('agenda_members').insert({agenda_id:ag.id,user_id:ME.id,role:'a'});
+ if(me){await sb.from('agendas').delete().eq('id',ag.id);return T('Não foi possível criar a agenda, tente novamente')}
  await loadMyAgendas();
  S.ev=null;S.p='ppl';
  await A.openAgenda(ag.id);
@@ -294,15 +313,13 @@ async create(){
 async join(){
  const c=$('#cd').value.trim().toUpperCase();
  if(!c)return T('Informe o código');
- const{data:found}=await sb.rpc('find_agenda_by_code',{p_code:c});
- const ag=found&&found[0];
- if(!ag)return T('Código não encontrado');
- const{error}=await sb.from('agenda_members').insert({agenda_id:ag.id,user_id:ME.id,role:'p'});
- if(error)return T('Você já participa desta agenda');
+ const{data:agId,error}=await sb.rpc('join_agenda',{p_code:c});
+ if(error)return T(/code_not_found/.test(error.message)?'Código não encontrado':error.code=='23505'?'Você já participa desta agenda':'Não foi possível entrar na agenda');
  await loadMyAgendas();
+ const ag=MY_AGS.find(a=>a.id==agId);
  S.ev=null;S.p='cal';
- await A.openAgenda(ag.id);
- T('Você entrou em '+ag.name);
+ await A.openAgenda(agId);
+ T('Você entrou em '+(ag?ag.name:'a agenda'));
 },
 
 async open_ag(i){S.ev=null;S.p='cal';S.day=iso(new Date());S.m=new Date();await A.openAgenda(i)},
@@ -311,7 +328,8 @@ async openAgenda(i){S.ag=i;await loadAgenda(i);R()},
 day(k){S.day=k;S.ev=null;R()},mo(n){S.m=new Date(S.m.getFullYear(),S.m.getMonth()+n,1);R()},
 
 async open(i){
- const a=cur(),e=a.events.find(x=>x.id==i);
+ const a=cur(),e=a&&a.events.find(x=>x.id==i);
+ if(!e)return;
  if(S.ev!=i)S.since=e.views[ME.id]||0;
  S.ev=i;R();
  await sb.from('event_views').upsert({event_id:i,user_id:ME.id,viewed_at:new Date().toISOString()},{onConflict:'event_id,user_id'});
@@ -344,7 +362,8 @@ async saveev(){
 async del(i){
  if(!confirm('Excluir este evento?'))return;
  const a=cur();
- await sb.from('events').delete().eq('id',i);
+ const{error}=await sb.from('events').delete().eq('id',i);
+ if(error)return T('Não foi possível excluir o evento');
  S.ev=null;
  await A.openAgenda(a.id);
 },
@@ -392,13 +411,15 @@ async role(u){
 async rm(u){
  if(!confirm('Remover '+UN(u)+' da agenda?'))return;
  const a=cur();
- await sb.from('agenda_members').delete().eq('agenda_id',a.id).eq('user_id',u);
+ const{error}=await sb.from('agenda_members').delete().eq('agenda_id',a.id).eq('user_id',u);
+ if(error)return T('Não foi possível remover o participante');
  await A.openAgenda(a.id);
 },
 
 async leave(i){
  if(!confirm('Sair desta agenda?'))return;
- await sb.from('agenda_members').delete().eq('agenda_id',i).eq('user_id',ME.id);
+ const{error}=await sb.from('agenda_members').delete().eq('agenda_id',i).eq('user_id',ME.id);
+ if(error)return T('Não foi possível sair da agenda');
  await loadMyAgendas();
  if(S.ag==i)S.ag=(MY_AGS[0]||{}).id;
  S.p='mine';
@@ -408,7 +429,8 @@ async leave(i){
 async delag(){
  if(!confirm('Excluir a agenda e todos os eventos? Não dá para desfazer.'))return;
  const i=S.ag;
- await sb.from('agendas').delete().eq('id',i);
+ const{error}=await sb.from('agendas').delete().eq('id',i);
+ if(error)return T('Não foi possível excluir a agenda');
  await loadMyAgendas();
  S.ag=(MY_AGS[0]||{}).id;S.p='mine';
  if(S.ag)await A.openAgenda(S.ag);else R();
@@ -448,7 +470,7 @@ async saveprof(){
   const{error}=await sb.auth.updateUser(updates);
   if(error)return T('Não foi possível atualizar e-mail/senha: '+error.message);
  }
- ME.name=n;ME.email=m;PROFILES[ME.id]=n;
+ ME.name=n;if(!updates.email)ME.email=m;PROFILES[ME.id]=n;
  R();T('Perfil atualizado'+(updates.email?' (confirme o novo e-mail na caixa de entrada)':''));
 }
 };

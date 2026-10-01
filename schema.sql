@@ -77,6 +77,7 @@ create table public.notifications (
   read boolean not null default false
 );
 
+create unique index agendas_one_per_owner on public.agendas (owner_id);
 create index on public.agenda_members (user_id);
 create index on public.events (agenda_id);
 create index on public.questions (agenda_id);
@@ -116,13 +117,27 @@ drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created after insert on auth.users
   for each row execute function public.handle_new_user();
 
--- Busca uma agenda pelo código (usado para "Participar com código")
-create or replace function public.find_agenda_by_code(p_code text) returns table(id uuid, name text)
-language sql security definer stable set search_path = public as $$
-  select id, name from public.agendas where upper(code) = upper(p_code);
+-- Entrar numa agenda com o código (único caminho para virar participante)
+create or replace function public.join_agenda(p_code text) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare ag uuid;
+begin
+  if auth.uid() is null then raise exception 'not_authenticated'; end if;
+  select id into ag from public.agendas where upper(code) = upper(p_code);
+  if ag is null then raise exception 'code_not_found'; end if;
+  insert into public.agenda_members (agenda_id, user_id, role) values (ag, auth.uid(), 'p');
+  return ag;
+end;
 $$;
 
-grant execute on function public.find_agenda_by_code(text) to authenticated;
+revoke execute on function public.join_agenda(text) from public, anon;
+grant execute on function public.join_agenda(text) to authenticated;
+
+-- true se _user_id é o criador da agenda (usado nas policies de agenda_members)
+create or replace function public.is_owner_of(_agenda_id uuid, _user_id uuid) returns boolean
+language sql security definer stable set search_path = public as $$
+  select exists(select 1 from public.agendas where id = _agenda_id and owner_id = _user_id);
+$$;
 
 -- =========================================================
 -- NOTIFICAÇÕES AUTOMÁTICAS (triggers)
@@ -267,8 +282,14 @@ create policy profiles_select_authenticated on public.profiles for select
 create policy profiles_update_own on public.profiles for update
   using (auth.uid() = id) with check (auth.uid() = id);
 
+-- CPF é dado sensível: ninguém lê/edita pela API (só id, name, created_at; o nome é editável).
+-- O CPF do próprio usuário vem de auth.users.raw_user_meta_data (user_metadata no front).
+revoke select, update on public.profiles from anon, authenticated;
+grant select (id, name, created_at) on public.profiles to authenticated;
+grant update (name) on public.profiles to authenticated;
+
 create policy agendas_select_members on public.agendas for select
-  using (public.is_member(id));
+  using (public.is_member(id) or owner_id = auth.uid());
 create policy agendas_insert_owner on public.agendas for insert
   with check (owner_id = auth.uid());
 create policy agendas_update_admin on public.agendas for update
@@ -278,17 +299,15 @@ create policy agendas_delete_owner on public.agendas for delete
 
 create policy members_select_same_agenda on public.agenda_members for select
   using (public.is_member(agenda_id));
-create policy members_insert_self on public.agenda_members for insert
-  with check (
-    user_id = auth.uid() and (
-      (role = 'a' and exists(select 1 from public.agendas ag where ag.id = agenda_id and ag.owner_id = auth.uid()))
-      or role = 'p'
-    )
-  );
+-- Só o criador entra direto (como admin); participantes entram via join_agenda(código)
+create policy members_insert_owner on public.agenda_members for insert
+  with check (user_id = auth.uid() and role = 'a' and public.is_owner_of(agenda_id, auth.uid()));
+-- O criador não pode ser rebaixado nem removido
 create policy members_update_admin on public.agenda_members for update
-  using (public.is_admin(agenda_id)) with check (public.is_admin(agenda_id));
+  using (public.is_admin(agenda_id) and not public.is_owner_of(agenda_id, user_id))
+  with check (public.is_admin(agenda_id) and not public.is_owner_of(agenda_id, user_id));
 create policy members_delete_admin_or_self on public.agenda_members for delete
-  using (public.is_admin(agenda_id) or user_id = auth.uid());
+  using ((public.is_admin(agenda_id) or user_id = auth.uid()) and not public.is_owner_of(agenda_id, user_id));
 
 create policy events_select_members on public.events for select
   using (public.is_member(agenda_id));
@@ -302,7 +321,7 @@ create policy events_delete_admin on public.events for delete
 create policy views_select_own_or_admin on public.event_views for select
   using (user_id = auth.uid() or public.is_admin((select agenda_id from public.events e where e.id = event_id)));
 create policy views_insert_own on public.event_views for insert
-  with check (user_id = auth.uid());
+  with check (user_id = auth.uid() and public.is_member((select agenda_id from public.events e where e.id = event_id)));
 create policy views_update_own on public.event_views for update
   using (user_id = auth.uid()) with check (user_id = auth.uid());
 
