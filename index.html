@@ -141,9 +141,10 @@ async function subscribeAgenda(agId){
  if(RT_AGENDA_ID==agId)return;
  if(RT_AGENDA)await sb.removeChannel(RT_AGENDA);
  RT_AGENDA_ID=agId;
+ let rt;const reload=()=>{clearTimeout(rt);rt=setTimeout(async()=>{if(S.ag==agId){await loadAgenda(agId);R(1)}},250)};
  RT_AGENDA=sb.channel('agenda-'+agId)
-  .on('postgres_changes',{event:'*',schema:'public',table:'events',filter:'agenda_id=eq.'+agId},async()=>{if(S.ag==agId){await loadAgenda(agId);R(1)}})
-  .on('postgres_changes',{event:'*',schema:'public',table:'questions',filter:'agenda_id=eq.'+agId},async()=>{if(S.ag==agId){await loadAgenda(agId);R(1)}})
+  .on('postgres_changes',{event:'*',schema:'public',table:'events',filter:'agenda_id=eq.'+agId},reload)
+  .on('postgres_changes',{event:'*',schema:'public',table:'questions',filter:'agenda_id=eq.'+agId},reload)
   .on('postgres_changes',{event:'*',schema:'public',table:'agenda_members',filter:'agenda_id=eq.'+agId},async()=>{if(S.ag==agId){await loadAgenda(agId);await loadMyAgendas();R(1)}})
   .subscribe();
 }
@@ -346,14 +347,18 @@ async saveev(){
  if(he<=h)return T('O horário final deve ser depois do horário de início');
  let evId=S.mod.id;
  if(evId){
-  const{error}=await sb.from('events').update({title:t,date:d,start_time:h,end_time:he,description:ds,note:nt}).eq('id',evId);
-  if(error)return T('Não foi possível salvar');
+  const[{data,error},]=await Promise.all([
+   sb.from('events').update({title:t,date:d,start_time:h,end_time:he,description:ds,note:nt}).eq('id',evId).select('id'),
+   sb.from('event_views').upsert({event_id:evId,user_id:ME.id,viewed_at:new Date().toISOString()},{onConflict:'event_id,user_id'})
+  ]);
+  if(error){console.error('saveev update',error);return T('Não foi possível salvar: '+error.message)}
+  if(!data||!data.length)return T('Sem permissão para editar este evento');
  }else{
   const{data,error}=await sb.from('events').insert({agenda_id:a.id,title:t,date:d,start_time:h,end_time:he,description:ds,note:nt,created_by:ME.id}).select().single();
-  if(error)return T('Não foi possível salvar');
+  if(error){console.error('saveev insert',error);return T('Não foi possível salvar: '+error.message)}
   evId=data.id;
+  await sb.from('event_views').upsert({event_id:evId,user_id:ME.id,viewed_at:new Date().toISOString()},{onConflict:'event_id,user_id'});
  }
- await sb.from('event_views').upsert({event_id:evId,user_id:ME.id,viewed_at:new Date().toISOString()},{onConflict:'event_id,user_id'});
  S.since=Date.now()+1;S.ev=evId;S.day=d;S.m=new Date(d+'T12:00');S.mod=null;
  await A.openAgenda(a.id);
  T('Evento salvo');

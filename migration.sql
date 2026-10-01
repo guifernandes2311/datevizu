@@ -54,3 +54,24 @@ create policy members_delete_admin_or_self on public.agenda_members for delete
 drop policy if exists views_insert_own on public.event_views;
 create policy views_insert_own on public.event_views for insert
   with check (user_id = auth.uid() and public.is_member((select agenda_id from public.events e where e.id = event_id)));
+
+-- 7) Corrige "malformed array literal: "título"" ao editar evento
+create or replace function public.trg_events_before_update() returns trigger
+language plpgsql as $$
+declare changed text[] := '{}';
+begin
+  if new.title is distinct from old.title then changed := array_append(changed, 'título'::text); end if;
+  if new.date is distinct from old.date or new.start_time is distinct from old.start_time or new.end_time is distinct from old.end_time then
+    changed := array_append(changed, 'data/horário'::text);
+  end if;
+  if new.description is distinct from old.description then changed := array_append(changed, 'descrição'::text); end if;
+  if new.note is distinct from old.note then changed := array_append(changed, 'observação'::text); end if;
+  if array_length(changed,1) > 0 then
+    new.last_changed_fields := changed;
+    new.last_changed_by := auth.uid();
+    new.last_changed_at := now();
+  end if;
+  new.updated_at := now();
+  return new;
+end;
+$$;

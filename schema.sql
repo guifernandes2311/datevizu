@@ -147,12 +147,12 @@ create or replace function public.trg_events_before_update() returns trigger
 language plpgsql as $$
 declare changed text[] := '{}';
 begin
-  if new.title is distinct from old.title then changed := changed || 'título'; end if;
+  if new.title is distinct from old.title then changed := array_append(changed, 'título'::text); end if;
   if new.date is distinct from old.date or new.start_time is distinct from old.start_time or new.end_time is distinct from old.end_time then
-    changed := changed || 'data/horário';
+    changed := array_append(changed, 'data/horário'::text);
   end if;
-  if new.description is distinct from old.description then changed := changed || 'descrição'; end if;
-  if new.note is distinct from old.note then changed := changed || 'observação'; end if;
+  if new.description is distinct from old.description then changed := array_append(changed, 'descrição'::text); end if;
+  if new.note is distinct from old.note then changed := array_append(changed, 'observação'::text); end if;
   if array_length(changed,1) > 0 then
     new.last_changed_fields := changed;
     new.last_changed_by := auth.uid();
